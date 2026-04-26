@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+.env
+
+# Database
+*.db
+*.sqlite3
+
+# Node
+node_modules/
+dist/
+build/
+
+# IDEs
+.vscode/
+.idea/
+
+# Telegram Session
+*.session
+*.session-journal
+
+# Google API
+client_secret_*.json
+token.json
+fastapi-backend/backend/client_secret_*.json
+fastapi-backend/token.json
