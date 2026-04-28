@@ -7,9 +7,10 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 
 from backend.database.db import SessionLocal
-from backend.database.models import TelegramGroup, StudentQuestion, Company, EmailLog
-from backend.services.llm_service import answer_student_question
+from backend.database.models import TelegramGroup, StudentQuestion, Company, EmailLog, RecruitmentDrive
+from backend.services.llm_service import answer_student_question, draft_questions_to_hr
 from backend.services.telegram_group_service import post_to_company_group
+from backend.services.email_service import send_email
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,26 @@ def poll_telegram_updates():
             logger.error(f"Telegram polling error: {e}")
             time.sleep(5)
 
+def _send_bot_message(chat_id: str, text: str):
+    """
+    Sends a message to a Telegram chat directly via HTTP (synchronous).
+    Used inside the polling thread where asyncio loop is already running.
+    """
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not bot_token:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
+        resp = requests.post(url, json=payload, timeout=10)
+        if not resp.ok:
+            logger.error(f"Bot reply failed: {resp.text}")
+        else:
+            logger.info(f"Bot replied to chat {chat_id}")
+    except Exception as e:
+        logger.error(f"Bot reply exception: {e}")
+
+
 def process_message(message: dict):
     """
     Process an incoming Telegram message.
@@ -63,8 +84,8 @@ def process_message(message: dict):
     text = message.get("text", "").strip()
     msg_id = message.get("message_id")
     
-    # We only care about text messages in supergroups
-    if chat.get("type") != "supergroup" or not text:
+    # We only care about text messages in groups/supergroups
+    if chat.get("type") not in ("supergroup", "group") or not text:
         return
         
     from_user = message.get("from", {})
@@ -94,15 +115,48 @@ def process_message(message: dict):
             
         logger.info(f"Received question from {user_name} in {company.company_name} group: {text}")
 
-        # Gather context
-        history = db.query(EmailLog).filter(EmailLog.company_id == company.id).order_by(EmailLog.timestamp.asc()).all()
-        email_history = [{"direction": e.direction, "subject": e.subject, "body": e.body} for e in history]
+        from backend.services.gmail_reader import read_latest_emails
+        try:
+            read_latest_emails(db, force_company_id=company.id)
+        except Exception as e:
+            logger.error(f"Failed to sync emails before answering question: {e}")
+
+        # Gather context (Knowledge Base rows instead of raw emails)
+        from backend.database.models import KnowledgeBaseEntry
+        kb_entries = db.query(KnowledgeBaseEntry).filter(
+            KnowledgeBaseEntry.company_id == company.id
+        ).all()
+        
+        if kb_entries:
+            company_kb = "\n".join([f"- [{e.category}] {e.topic}: {e.content}" for e in kb_entries])
+        else:
+            company_kb = ""
         
         # Call LLM
-        ans_data = answer_student_question(text, company.company_name, company.description, email_history)
+        ans_data = answer_student_question(text, company.company_name, company_kb)
         
         can_answer = ans_data.get("can_answer", False)
         auto_answer_text = ans_data.get("answer", "")
+        
+        drive = db.query(RecruitmentDrive).filter(RecruitmentDrive.id == tg_group.drive_id).first()
+        spoc_name = drive.spoc_name if (drive and drive.spoc_name) else "CDC NITK Surathkal"
+
+        if can_answer and auto_answer_text:
+            new_q_status = "AUTO_ANSWERED"
+            reply_text = f"@{from_user.get('username', user_name)} {auto_answer_text}"
+        else:
+            new_q_status = "FORWARDED_TO_HR"
+            # Auto-forward to HR
+            draft = draft_questions_to_hr(
+                questions_list=[text],
+                company_name=company.company_name,
+                poc_name=company.poc_name,
+                spoc_name=spoc_name
+            )
+            subject = f"Student Query - {company.company_name} Campus Drive"
+            send_email(company.email, subject, draft, company.id, db)
+            
+            reply_text = f"@{from_user.get('username', user_name)} I don't have the details for that yet. I've automatically emailed the HR to ask. I'll let you know as soon as they reply!"
         
         # Save question to DB
         new_q = StudentQuestion(
@@ -112,22 +166,15 @@ def process_message(message: dict):
             telegram_user_id=user_id,
             question_text=text,
             message_id=str(msg_id),
-            status="AUTO_ANSWERED" if can_answer else "ESCALATED",
+            status=new_q_status,
             auto_answer=auto_answer_text if can_answer else None,
             answered_at=datetime.utcnow() if can_answer else None
         )
         db.add(new_q)
         db.commit()
 
-        # Send response back to group if applicable
-        if can_answer and auto_answer_text:
-            reply_text = f"@{from_user.get('username', user_name)} {auto_answer_text}"
-            post_to_company_group(chat_id, reply_text)
-        else:
-            # We don't necessarily need to tell them we escalated it unless we want to, 
-            # maybe just a brief acknowledgment.
-            reply_text = f"@{from_user.get('username', user_name)} I don't have the details for that yet. I've escalated your question to the CDC SPOC to check with HR."
-            post_to_company_group(chat_id, reply_text)
+        # Use requests directly (synchronous) — cannot call run_until_complete from a running thread
+        _send_bot_message(chat_id, reply_text)
 
     except Exception as e:
         logger.error(f"Error processing message: {e}")

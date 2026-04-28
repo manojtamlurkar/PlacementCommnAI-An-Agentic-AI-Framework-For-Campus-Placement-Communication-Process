@@ -19,6 +19,7 @@ class Approval(Base):
     recruitment_id = Column(Integer, ForeignKey("recruitment_drive.id"))
     action = Column(String)
     status = Column(String, default="PENDING")
+    payload = Column(Text, nullable=True)
 
 class Company(Base):
     __tablename__ = "companies"
@@ -117,4 +118,23 @@ class StudentQuestion(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     answered_at = Column(DateTime, nullable=True)
 
+class SpocPool(Base):
+    __tablename__ = "spoc_pool"
 
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    email = Column(String, nullable=False)
+    is_available = Column(Boolean, default=True)
+    active_drives = Column(Integer, default=0)  # number of currently assigned drives
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class KnowledgeBaseEntry(Base):
+    __tablename__ = "knowledge_base_entries"
+
+    id = Column(Integer, primary_key=True, index=True)
+    company_id = Column(Integer, ForeignKey("companies.id"), nullable=False)
+    category = Column(String, index=True)
+    topic = Column(String, index=True)
+    content = Column(Text, nullable=False)
+    source_email_id = Column(Integer, ForeignKey("email_logs.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)

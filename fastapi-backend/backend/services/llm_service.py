@@ -97,9 +97,10 @@ def generate_followup_email(company_name: str, poc_name: str, email_history: lis
 
         for e in email_history:  # already oldest → newest from DB
             if e["direction"] == "SENT":
+                body_preview = e["body"].strip()
                 thread_parts.append(
                     f"[CDC → {company_name}] Subject: \"{e['subject']}\"\n"
-                    f"(CDC sent the campus placement drive invitation for the 2026 batch.)"
+                    f"CDC's message: {body_preview}"
                 )
             else:
                 body_preview = e["body"].strip()
@@ -211,6 +212,57 @@ Email Text:
         logger.error(f"Groq LLM email parsing failed: {e}")
         return default_json
 
+def analyze_hr_response_intent(email_body: str, email_subject: str = "") -> dict:
+    """
+    Enhanced intent analysis for the autonomous agent.
+    Classifies HR email into actionable categories for automated decision-making.
+    Returns: {intent, confirmed_date, summary, requires_reply}
+    """
+    default_result = {
+        "intent": "UNKNOWN",
+        "confirmed_date": None,
+        "summary": "Could not analyze the email.",
+        "requires_reply": False
+    }
+    try:
+        client = get_groq_client()
+        if not client:
+            return default_result
+
+        prompt = f"""You are an AI recruitment coordinator analyzing an HR email response.
+
+Subject: {email_subject}
+Email Body:
+{email_body[:6000]}
+
+Classify this email into EXACTLY ONE of these intents:
+- DRIVE_CONFIRMED: HR has confirmed participation in the campus drive, possibly with dates or JD attached.
+- QUERY: HR is asking clarifying questions or requesting more info before confirming.
+- REJECTION: HR has declined or expressed inability to participate.
+- INFO_SHARED: HR shared JD, compensation, or other details but has NOT yet confirmed dates or participation.
+- UNKNOWN: Cannot determine the intent clearly.
+
+Also extract:
+- confirmed_date: If the HR mentioned any specific drive date, extract it as a string (e.g., "2026-05-15"). If no date mentioned, set to null.
+- summary: A 1-2 sentence summary of what the HR said.
+- requires_reply: true if the email asks questions or needs a response from CDC, false otherwise.
+
+Respond STRICTLY as a JSON object:
+{{"intent": "...", "confirmed_date": "..." or null, "summary": "...", "requires_reply": true/false}}
+"""
+        completion = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.1-8b-instant",
+            response_format={"type": "json_object"}
+        )
+
+        result = json.loads(completion.choices[0].message.content)
+        logger.info(f"HR intent analysis: {result.get('intent')} | summary: {result.get('summary', '')[:80]}")
+        return result
+    except Exception as e:
+        logger.error(f"HR response intent analysis failed: {e}")
+        return default_result
+
 def generate_telegram_drive_message(company_name: str, drive_date: str, classroom_name: str, registration_link: str, followup_questions: list) -> str:
     default_text = f"**{company_name} - Campus Drive Update**\n\nDate: {drive_date}\nVenue: {classroom_name}\nRegistration Link: {registration_link or 'TBA'}\n\nNote: We are clarifying a few details with {company_name}."
     try:
@@ -311,9 +363,66 @@ def generate_spoc_assignment_email(spoc_name: str, company_name: str, hr_email: 
         logger.error(f"Groq SPOC Assignment draft failed: {e}")
         return default_text
 
-def answer_student_question(question: str, company_name: str, company_description: str, email_history: list) -> dict:
+def extract_knowledge_entries(company_name: str, new_email_content: str) -> list:
     """
-    Given a student's question, attempts to answer it using the company's JD/Description and previous email communications.
+    Reads a new HR email and extracts distinct factual statements or answers into a JSON list.
+    """
+    try:
+        client = get_groq_client()
+        if not client:
+            return []
+
+        prompt = f"""You are the CDC NITK Surathkal Knowledge Extraction Engine.
+Your job is to read an incoming HR email for {company_name} and extract ALL distinct factual rules, requirements, answers, or data points.
+
+New Incoming Email from HR:
+{new_email_content}
+
+Instructions:
+1. Break down the email into independent, self-contained factual entries.
+2. Group them by "category" (e.g., "Eligibility", "Logistics", "Compensation", "General").
+3. Give each entry a short "topic" (e.g., "Minimum CGPA", "Interview Date", "Bond Period").
+4. Provide the extracted fact in the "content" field.
+5. Return strictly a JSON object with a single key "entries" containing the array of facts.
+
+Expected Output Format:
+{
+  "entries": [
+    {"category": "Eligibility", "topic": "Minimum CGPA", "content": "7.0 CGPA and above with no active backlogs."},
+    {"category": "Compensation", "topic": "Stipend", "content": "50,000 INR per month for 6 months."}
+  ]
+}
+"""
+        completion = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.1-8b-instant",
+            response_format={"type": "json_object"},
+        )
+        
+        # Note: Groq with response_format={"type": "json_object"} sometimes expects the root to be an object.
+        # To be safe, we wrap the array in a root object if needed, but since we asked for an array, 
+        # let's parse it defensively.
+        import json
+        result_text = completion.choices[0].message.content.strip()
+        data = json.loads(result_text)
+        
+        # Handle cases where LLM returns {"entries": [...]} instead of just [...]
+        if isinstance(data, dict):
+            for key in data.keys():
+                if isinstance(data[key], list):
+                    return data[key]
+            return []
+        elif isinstance(data, list):
+            return data
+            
+        return []
+    except Exception as e:
+        logger.error(f"Groq KB extraction failed: {e}")
+        return []
+
+def answer_student_question(question: str, company_name: str, company_kb: str) -> dict:
+    """
+    Given a student's question, attempts to answer it using ONLY the company's Knowledge Base.
     Returns: {"can_answer": bool, "answer": "The answer or reasoning", "confidence": float}
     """
     default_resp = {"can_answer": False, "answer": "I don't have enough context to answer this. I will escalate this to the SPOC.", "confidence": 0.0}
@@ -323,28 +432,258 @@ def answer_student_question(question: str, company_name: str, company_descriptio
         if not client:
             return default_resp
             
-        thread_parts = []
-        for e in email_history:
-            sender = "CDC" if e["direction"] == "SENT" else company_name
-            thread_parts.append(f"[{sender}] Subject: {e['subject']}\n{e['body']}")
-        thread_summary = "\n\n---\n\n".join(thread_parts)
+        kb_text = company_kb or "No knowledge base available yet."
 
         prompt = f"""You are the 'Company Agent', an AI assistant helping students in the {company_name} recruitment Telegram group.
 A student asked: "{question}"
 
-Here is the context available to you:
-Company Description/JD:
-{company_description or 'Not provided.'}
+Here is the official Company Knowledge Base:
+{kb_text}
 
-Recent Email History between CDC and HR:
-{thread_summary or 'No emails.'}
-
-Determine if you can confidently and accurately answer the student's question based ONLY on the provided context.
-If the answer is explicitly stated or can be strongly inferred, respond with can_answer=true and provide the answer.
-If the answer is NOT in the context, respond with can_answer=false and state that it will be forwarded to the HR.
+Instructions:
+1. Determine if you can confidently and accurately answer the student's question based ONLY on the provided Knowledge Base.
+2. If the answer is explicitly stated or can be strongly inferred from the KB, respond with can_answer=true and provide the answer.
+3. If the answer is NOT in the KB, respond with can_answer=false and state that it will be forwarded to the HR. Do NOT guess or make up information.
+4. Keep the tone friendly and professional.
 
 Format your response strictly as a JSON object:
 {{"can_answer": true/false, "answer": "Your detailed response to the student", "confidence": 0.0-1.0}}
+"""
+        completion = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.1-8b-instant",
+            response_format={"type": "json_object"},
+        )
+        
+        import json
+        result_text = completion.choices[0].message.content
+        data = json.loads(result_text)
+        logger.info(f"Answered Q based on KB for {company_name}: {data.get('can_answer')}")
+        return data
+    except Exception as e:
+        logger.error(f"Groq question answering failed: {e}")
+        return default_resp
+
+def draft_questions_to_hr(questions_list: list, company_name: str, poc_name: str, spoc_name: str) -> str:
+    """
+    Drafts an email to HR containing a list of escalated student questions.
+    Uses LLM to deduplicate and professionally format the raw queries before inserting into a template.
+    """
+    greeting = f"Dear {poc_name}," if poc_name else f"Dear {company_name} HR Team,"
+    raw_qs = "\n".join([f"- {q}" for q in questions_list])
+    
+    default_text = f"{greeting}\n\nGreetings from CDC NITK Surathkal.\n\nOur students have a few queries regarding the upcoming drive. Could you please clarify the following:\n\n{raw_qs}\n\nLooking forward to your response.\n\nRegards,\n{spoc_name}\nStudent SPOC, CDC NITK Surathkal"
+    
+    try:
+        client = get_groq_client()
+        if not client:
+            return default_text
+            
+        prompt = f"""You are an assistant responsible for transforming raw student queries into a structured, professional format suitable for communication with a company HR.
+
+Your task is to process a list of student questions and produce a clean, deduplicated, and well-organized set of formal inquiries.
+
+Instructions:
+1. Analyze all input questions carefully.
+2. Identify and merge duplicate or semantically similar questions.
+3. Group related questions under common themes.
+4. Rewrite them into clear, professional, and concise bullet points.
+5. Remove informal language, repetitions, and irrelevant details.
+6. Do NOT lose the original intent of any question.
+7. Do NOT introduce new information or assumptions.
+8. Keep the output suitable for an official academic communication.
+
+Raw Student Questions:
+{raw_qs}
+
+Output format:
+- Start with a short header:
+  "We would appreciate clarification on the following:"
+- Then provide grouped bullet points (no more than necessary, keep it concise).
+- Do NOT include student names, timestamps, or chat-style text.
+- Do NOT explain your reasoning.
+- Do NOT include raw questions.
+
+Goal:
+Transform unstructured student queries into a minimal, professional, and non-redundant set of HR-facing questions."""
+
+        completion = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.1-8b-instant",
+        )
+        
+        structured_qs = completion.choices[0].message.content.strip()
+        
+        # Assemble final email
+        result = f"{greeting}\n\nGreetings from CDC NITK Surathkal.\n\n{structured_qs}\n\nLooking forward to your response.\n\nRegards,\n{spoc_name}\nStudent SPOC, CDC NITK Surathkal"
+        
+        logger.info(f"Generated HR questions draft for {company_name}")
+        return result
+    except Exception as e:
+        logger.error(f"Groq HR questions draft failed: {e}")
+        return default_text
+
+def generate_telegram_broadcast_draft(company_name: str, company_description: str, email_history: list, invite_link: str) -> str:
+    """
+    Drafts a DETAILED announcement for the MAIN student channel.
+    Purpose: Announce the drive, provide full JD/eligibility details, and give the group invite link.
+    """
+    default_text = (
+        f"📢 **New Campus Drive: {company_name}**\n\n"
+        f"We are excited to announce that **{company_name}** is visiting NITK Surathkal for campus recruitment!\n\n"
+        f"🔗 Join the dedicated group for full updates and logistics:\n"
+        f"👉 {invite_link}\n\n"
+        f"_(Posted by CDC NITK Surathkal)_"
+    )
+    try:
+        client = get_groq_client()
+        if not client:
+            return default_text
+
+        latest_received = None
+        for e in reversed(email_history):
+            if e["direction"] == "RECEIVED":
+                latest_received = e
+                break
+
+        if latest_received:
+            email_context = f"Subject: {latest_received['subject']}\nBody: {latest_received['body']}"
+        else:
+            email_context = "No recent emails received from the company."
+
+        prompt = f"""You are the CDC NITK Surathkal Recruitment System.
+Write a COMPREHENSIVE announcement for the MAIN student announcement channel to inform students about the {company_name} campus placement drive.
+
+Latest Email from HR (may contain JD/compensation details):
+{email_context[-8000:]}
+
+Invite Link to the company-specific group: {invite_link}
+
+Instructions:
+1. Start with a warm announcement of the company name.
+2. Include the FULL details under CLEAR HEADINGS (include only sections where data is available):
+   📌 **Role**: [role name]
+   🎓 **Eligible Branches**: [list all branches and degree types]
+   📝 **Job Description**: [description of responsibilities]
+   ✅ **Minimum Qualifications**: [required skills/qualifications]
+   💰 **Compensation Breakdown**: [full CTC details]
+   📅 **Application Deadline**: [date and time]
+3. Strongly encourage interested students to join the dedicated Telegram group using the invite link.
+4. Use Markdown formatting (bold for company name and key terms).
+5. Do NOT omit any compensation or eligibility details — include everything from the HR email.
+6. Total length can be up to 350 words.
+
+Sign off with:
+_(Posted by CDC NITK Surathkal)_
+"""
+        completion = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.1-8b-instant",
+        )
+        result = completion.choices[0].message.content
+        logger.info(f"Generated main-channel announcement for {company_name}")
+        return result
+    except Exception as e:
+        logger.error(f"Main channel broadcast drafting failed: {e}")
+        return default_text
+
+
+def generate_company_group_jd_post(company_name: str, email_history: list) -> str:
+    """
+    Drafts a DETAILED JD post for the company-specific Telegram group.
+    Includes: Role Name, Job Description, Eligibility Criteria, CTC/Compensation breakdown,
+              Application Deadline, and any other relevant details from the HR email/attachments.
+    """
+    default_text = (
+        f"📋 **{company_name} — Full Drive Details**\n\n"
+        f"Details from HR will be updated here shortly. Stay tuned!\n\n"
+        f"_(Posted by CDC NITK Surathkal)_"
+    )
+    try:
+        client = get_groq_client()
+        if not client:
+            return default_text
+
+        latest_received = None
+        for e in reversed(email_history):
+            if e["direction"] == "RECEIVED":
+                latest_received = e
+                break
+
+        if not latest_received:
+            return default_text
+
+        email_context = f"Subject: {latest_received['subject']}\nBody: {latest_received['body']}"
+
+        prompt = f"""You are the CDC NITK Surathkal Recruitment System.
+Create a COMPREHENSIVE and well-structured Telegram post for the **{company_name}** company-specific placement group.
+This message will be pinned in the group and should serve as the single source of truth for all drive details.
+
+HR Email (includes text from attached PDFs like JD and Compensation documents):
+{email_context[-8000:]}
+
+Instructions:
+1. Start with a welcome message to the group.
+2. Organize the information under CLEAR HEADINGS using these sections (include only sections where data is available):
+   📌 **Role**: [role name]
+   🎓 **Eligible Branches**: [list all branches and degree types]
+   📝 **Job Description**: [brief description of responsibilities]
+   ✅ **Minimum Qualifications**: [required skills/qualifications]
+   ⭐ **Preferred Qualifications**: [preferred skills]
+   💰 **Compensation Breakdown**: [full CTC details per degree type]
+   📅 **Application Deadline**: [date and time]
+3. End with a note encouraging students to ask questions in this group.
+4. Use Markdown formatting with bold headings and bullet points.
+5. Do NOT omit any compensation or eligibility details — include everything from the HR email.
+6. Total length can be up to 400 words.
+
+Sign off with:
+_(Posted by CDC NITK Surathkal · {company_name} Drive 2026)_
+"""
+        completion = client.chat.completions.create(
+            messages=[{"role": "user", "content": prompt}],
+            model="llama-3.1-8b-instant",
+        )
+        result = completion.choices[0].message.content
+        logger.info(f"Generated detailed JD post for {company_name} company group")
+        return result
+    except Exception as e:
+        logger.error(f"Company group JD post generation failed: {e}")
+        return default_text
+
+
+def extract_answers_from_hr_email(email_body: str, questions_list: list) -> dict:
+    """
+    Given an HR's reply email and a list of questions that were asked, 
+    extracts the answers to those questions.
+    Returns a dict mapping the question text to the HR's answer.
+    """
+    if not questions_list:
+        return {}
+        
+    try:
+        client = get_groq_client()
+        if not client:
+            return {}
+            
+        qs_bullets = "\n".join([f"- {q}" for q in questions_list])
+        
+        prompt = f"""You are an AI assistant analyzing an HR email reply.
+We previously asked HR the following questions:
+{qs_bullets}
+
+Here is the HR's reply:
+"{email_body}"
+
+Extract the answers HR provided for each question. 
+Return the result STRICTLY as a JSON object where the keys are the exact question strings, and the values are the extracted answers.
+If a question was not answered in the email, do not include it in the JSON object, or set its value to null.
+
+Format:
+{{
+  "question text 1": "HR's answer",
+  "question text 2": "HR's answer"
+}}
 """
         completion = client.chat.completions.create(
             messages=[{"role": "user", "content": prompt}],
@@ -353,46 +692,8 @@ Format your response strictly as a JSON object:
         )
         
         result_content = completion.choices[0].message.content
-        logger.info(f"Groq processed student question for {company_name}")
+        logger.info(f"Successfully extracted HR answers via LLM")
         return json.loads(result_content)
     except Exception as e:
-        logger.error(f"Groq auto-answer failed: {e}")
-        return default_resp
-
-def draft_questions_to_hr(questions_list: list, company_name: str, poc_name: str, spoc_name: str) -> str:
-    """
-    Drafts an email to HR containing a list of escalated student questions.
-    """
-    greeting = f"Dear {poc_name}," if poc_name else f"Dear {company_name} HR Team,"
-    qs_bullets = "\n".join([f"- {q}" for q in questions_list])
-    
-    default_text = f"{greeting}\n\nGreetings from CDC NITK Surathkal.\n\nOur students have a few queries regarding the upcoming drive. Could you please clarify the following:\n\n{qs_bullets}\n\nLooking forward to your response.\n\nRegards,\n{spoc_name}\nStudent SPOC, CDC NITK Surathkal"
-    
-    try:
-        client = get_groq_client()
-        if not client:
-            return default_text
-            
-        prompt = f"""You are {spoc_name}, the Student SPOC for the {company_name} placement drive at NITK Surathkal.
-Write a professional email to {company_name}'s HR team ({poc_name or 'HR Team'}) to ask the following questions raised by students:
-
-{qs_bullets}
-
-Keep the email polite, clear, and professional. It should be under 150 words.
-Do not use placeholders. 
-End with this signature:
-Regards,
-{spoc_name}
-Student SPOC, CDC NITK Surathkal
-"""
-        completion = client.chat.completions.create(
-            messages=[{"role": "user", "content": prompt}],
-            model="llama-3.1-8b-instant",
-        )
-        
-        result = completion.choices[0].message.content
-        logger.info(f"Generated HR questions draft for {company_name}")
-        return result
-    except Exception as e:
-        logger.error(f"Groq HR questions draft failed: {e}")
-        return default_text
+        logger.error(f"Groq LLM answer extraction failed: {e}")
+        return {}

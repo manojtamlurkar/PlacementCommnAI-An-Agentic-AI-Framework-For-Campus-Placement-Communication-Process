@@ -41,7 +41,7 @@ def perform_approval_action(req: ApprovalActionRequest, db: Session = Depends(ge
         raise HTTPException(status_code=400, detail="Invalid action. Must be 'APPROVE' or 'REJECT'.")
         
     try:
-        approval = handle_action(req.approval_id, req.action, db)
+        approval = handle_action(req.approval_id, req.action, db, req.updated_payload)
         
         if not approval:
             raise HTTPException(status_code=404, detail="Approval not found")

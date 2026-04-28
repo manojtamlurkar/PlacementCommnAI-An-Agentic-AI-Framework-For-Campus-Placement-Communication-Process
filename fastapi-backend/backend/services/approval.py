@@ -6,9 +6,9 @@ from backend.services.telegram_service import send_telegram_message
 
 logger = logging.getLogger(__name__)
 
-def create_approval(recruitment_id: int, step_name: str, db: Session):
+def create_approval(recruitment_id: int, step_name: str, db: Session, payload: str = None):
     try:
-        new_approval = Approval(recruitment_id=recruitment_id, action=step_name, status="PENDING")
+        new_approval = Approval(recruitment_id=recruitment_id, action=step_name, status="PENDING", payload=payload)
         db.add(new_approval)
         db.commit()
         db.refresh(new_approval)
@@ -25,7 +25,7 @@ def get_pending_approvals(db: Session):
         logger.error(f"Error fetching pending approvals: {e}")
         raise
 
-def handle_action(approval_id: int, action: str, db: Session):
+def handle_action(approval_id: int, action: str, db: Session, updated_payload: str = None):
     try:
         approval = db.query(Approval).filter(Approval.id == approval_id).first()
         
@@ -34,14 +34,47 @@ def handle_action(approval_id: int, action: str, db: Session):
             
         if action == "APPROVE":
             approval.status = "APPROVED"
+            
+            # If payload was updated, save it back
+            if updated_payload is not None:
+                approval.payload = updated_payload
+                
             db.commit()
             
             # Trigger workflow actions upon approval automatically
             if approval.action == "SEND_EMAIL":
-                # Execution shifted perfectly to Draft -> Edit -> Send UI flow
-                pass
+                import json
+                from backend.services.email_service import send_email
+                from backend.database.models import StudentQuestion, Company
+                from backend.services.orchestrator import orchestrator
+                
+                payload_str = approval.payload
+                if payload_str:
+                    payload_data = json.loads(payload_str)
+                    to_email = payload_data.get("to_email")
+                    subject = payload_data.get("subject")
+                    body = payload_data.get("body")
                     
+                    drive = db.query(RecruitmentDrive).filter(RecruitmentDrive.id == approval.recruitment_id).first()
+                    target_company = db.query(Company).filter(Company.company_name == drive.company_name).first() if drive else None
+                    company_id_link = target_company.id if target_company else None
                     
+                    success = send_email(to_email, subject, body, company_id_link, db)
+                    if success:
+                        questions = db.query(StudentQuestion).filter(
+                            StudentQuestion.company_id == company_id_link,
+                            StudentQuestion.status.in_(["ESCALATED", "PENDING"])
+                        ).all()
+                        if questions:
+                            for q in questions:
+                                q.status = "FORWARDED_TO_HR"
+                            db.commit()
+                            
+                        orchestrator.log_event(
+                            db=db, actor="USER", action="EMAIL_SENT",
+                            details=f"Email dispatched to {to_email} | Subject: {subject}",
+                            company_id=company_id_link
+                        )
             elif approval.action == "NOTIFY_STUDENTS":
                 drive = db.query(RecruitmentDrive).filter(RecruitmentDrive.id == approval.recruitment_id).first()
                 if drive:

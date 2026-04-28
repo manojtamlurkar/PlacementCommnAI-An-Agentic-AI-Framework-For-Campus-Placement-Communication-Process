@@ -8,11 +8,14 @@ from backend.routes.logistics import router as logistics_router
 from backend.routes.activity import router as activity_router
 from backend.routes.telegram_group import router as telegram_group_router
 from backend.routes.spoc import router as spoc_router
+from backend.routes.agent_console import router as agent_console_router
 from backend.database.db import engine, Base
 from dotenv import load_dotenv
 import os
 from contextlib import asynccontextmanager
 from backend.services.company_agent import start_agent_thread
+from backend.services.gmail_reader import start_gmail_sync_thread
+from backend.services.autonomous_agent import start_autonomous_agent_thread
 
 load_dotenv()
 
@@ -23,6 +26,10 @@ Base.metadata.create_all(bind=engine)
 async def lifespan(app: FastAPI):
     # Start telegram polling thread for Company Agent
     start_agent_thread()
+    # Start background Gmail checking for real-time live notifications
+    start_gmail_sync_thread()
+    # Start autonomous agent engine for pipeline automation
+    start_autonomous_agent_thread()
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -44,6 +51,10 @@ app.include_router(logistics_router)
 app.include_router(activity_router)
 app.include_router(telegram_group_router)
 app.include_router(spoc_router)
+app.include_router(agent_console_router)
+
+from backend.routes.spoc_pool import router as spoc_pool_router
+app.include_router(spoc_pool_router)
 
 @app.get("/")
 def read_root():

@@ -5,9 +5,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from typing import List
 
 from backend.database.db import get_db
-from backend.database.models import Company, EmailLog
+from backend.database.models import Company, EmailLog, RecruitmentDrive
 from backend.schemas.company_schema import CompanyCreate, CompanyUpdate, CompanyResponse, EmailLogResponse
 from backend.schemas.recruitment_schema import StandardResponse
+from backend.services.gmail_reader import read_latest_emails
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +55,22 @@ def update_company(id: int, company_data: CompanyUpdate, db: Session = Depends(g
         if not company:
             raise HTTPException(status_code=404, detail="Company not found")
             
+        old_name = company.company_name
         update_dict = company_data.model_dump(exclude_unset=True)
         for key, value in update_dict.items():
             setattr(company, key, value)
+            
+        # Cascade update to RecruitmentDrive if name or email changed
+        if "company_name" in update_dict and update_dict["company_name"] != old_name:
+            drives = db.query(RecruitmentDrive).filter(RecruitmentDrive.company_name == old_name).all()
+            for drive in drives:
+                drive.company_name = update_dict["company_name"]
+                
+        if "email" in update_dict:
+            # Update hr_email to match the new company primary email
+            drives = db.query(RecruitmentDrive).filter(RecruitmentDrive.company_name == company.company_name).all()
+            for drive in drives:
+                drive.hr_email = update_dict["email"]
             
         db.commit()
         db.refresh(company)
@@ -86,6 +100,9 @@ def delete_company(id: int, db: Session = Depends(get_db)):
 @router.get("/{id}/emails", response_model=StandardResponse[List[EmailLogResponse]])
 def get_company_emails(id: int, db: Session = Depends(get_db)):
     try:
+        # Sync emails first
+        read_latest_emails()
+        
         # Check if exists
         company = db.query(Company).filter(Company.id == id).first()
         if not company:

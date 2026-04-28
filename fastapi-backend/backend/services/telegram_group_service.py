@@ -50,6 +50,7 @@ async def _create_group_async(group_name: str) -> dict:
     3. Add bot as admin
     4. Export invite link
     """
+    import requests as sync_requests
     from telethon import TelegramClient
     from telethon.tl.functions.channels import (
         CreateChannelRequest,
@@ -58,7 +59,6 @@ async def _create_group_async(group_name: str) -> dict:
     )
     from telethon.tl.functions.messages import ExportChatInviteRequest
     from telethon.tl.types import ChatAdminRights
-    from telethon.errors import SessionPasswordNeededError
 
     session_path = SESSION_FILE
     if not os.path.exists(f"{session_path}.session"):
@@ -66,6 +66,16 @@ async def _create_group_async(group_name: str) -> dict:
             "telegram_session.session not found. "
             "Please run setup_telegram_session.py first to authenticate."
         )
+
+    # Pre-fetch bot username via Bot API so we can resolve it reliably
+    bot_username = None
+    try:
+        me_resp = sync_requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getMe", timeout=10)
+        if me_resp.ok:
+            bot_username = me_resp.json().get("result", {}).get("username")
+            logger.info(f"Resolved bot username: @{bot_username}")
+    except Exception as e:
+        logger.warning(f"Could not pre-fetch bot username: {e}")
 
     async with TelegramClient(session_path, API_ID, API_HASH) as client:
         # 1. Create the supergroup
@@ -75,39 +85,53 @@ async def _create_group_async(group_name: str) -> dict:
             megagroup=True,   # True = supergroup (not broadcast channel)
         ))
         channel = result.chats[0]
-        chat_id = str(-100_000_000_000 - channel.id)  # Standard Telegram supergroup ID format
+        # Correct Telegram supergroup ID: prepend -100 to the channel ID
+        chat_id = str(int(f"-100{channel.id}"))
 
-        logger.info(f"Created Telegram supergroup: {group_name} (chat_id={chat_id})")
+        logger.info(f"Created Telegram supergroup: {group_name} (chat_id={chat_id}, raw_id={channel.id})")
 
-        # 2. Resolve the bot entity by its token prefix (bot_id)
-        bot_id = int(BOT_TOKEN.split(":")[0])
+        # 2. Resolve the bot entity — try by username first, then by numeric ID
+        bot_entity = None
         try:
-            bot_entity = await client.get_entity(bot_id)
-            # 3. Invite bot to group
-            await client(InviteToChannelRequest(channel=channel, users=[bot_entity]))
-            logger.info(f"Added bot {bot_entity.username} to group {group_name}")
-
-            # 4. Promote bot to admin with full rights
-            admin_rights = ChatAdminRights(
-                post_messages=True,
-                edit_messages=True,
-                delete_messages=True,
-                ban_users=True,
-                invite_users=True,
-                pin_messages=True,
-                add_admins=False,
-                manage_call=False,
-                change_info=False,
-            )
-            await client(EditAdminRequest(
-                channel=channel,
-                user_id=bot_entity,
-                admin_rights=admin_rights,
-                rank="CDC Bot"
-            ))
-            logger.info(f"Promoted bot to admin in {group_name}")
+            if bot_username:
+                bot_entity = await client.get_entity(f"@{bot_username}")
+                logger.info(f"Resolved bot entity via username: @{bot_username}")
+            else:
+                bot_id = int(BOT_TOKEN.split(":")[0])
+                bot_entity = await client.get_entity(bot_id)
+                logger.info(f"Resolved bot entity via numeric ID: {bot_id}")
         except Exception as e:
-            logger.warning(f"Could not add/promote bot: {e} — group still created.")
+            logger.error(f"Failed to resolve bot entity: {e}")
+
+        if bot_entity:
+            try:
+                # 3. Invite bot to group
+                await client(InviteToChannelRequest(channel=channel, users=[bot_entity]))
+                logger.info(f"Added bot @{bot_username or 'unknown'} to group {group_name}")
+
+                # 4. Promote bot to admin with full rights
+                admin_rights = ChatAdminRights(
+                    post_messages=True,
+                    edit_messages=True,
+                    delete_messages=True,
+                    ban_users=True,
+                    invite_users=True,
+                    pin_messages=True,
+                    add_admins=False,
+                    manage_call=False,
+                    change_info=False,
+                )
+                await client(EditAdminRequest(
+                    channel=channel,
+                    user_id=bot_entity,
+                    admin_rights=admin_rights,
+                    rank="CDC Bot"
+                ))
+                logger.info(f"Promoted bot to admin in {group_name}")
+            except Exception as e:
+                logger.error(f"Could not add/promote bot: {e} — group created but bot NOT added!")
+        else:
+            logger.error("Bot entity could not be resolved. Group created WITHOUT bot.")
 
         # 5. Export permanent invite link
         invite = await client(ExportChatInviteRequest(peer=channel))

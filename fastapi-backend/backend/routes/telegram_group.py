@@ -112,6 +112,40 @@ def create_telegram_group_for_drive(drive_id: int, db: Session = Depends(get_db)
         raise HTTPException(status_code=500, detail=f"Group creation failed: {str(e)}")
 
 
+@router.post("/draft-broadcast/{drive_id}", response_model=StandardResponse[dict])
+def draft_broadcast(drive_id: int, db: Session = Depends(get_db)):
+    """Generates an AI draft for the Telegram broadcast using JD context and invite link."""
+    from backend.services.llm_service import generate_telegram_broadcast_draft
+    from backend.database.models import EmailLog
+    from backend.services.gmail_reader import read_latest_emails
+    
+    group = db.query(TelegramGroup).filter(TelegramGroup.drive_id == drive_id, TelegramGroup.is_active == True).first()
+    if not group:
+        raise HTTPException(status_code=404, detail="No active Telegram group found for this drive")
+        
+    company = db.query(Company).filter(Company.id == group.company_id).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found")
+        
+    # Force a sync to make sure we have the latest JD email
+    try:
+        read_latest_emails(db, force_company_id=company.id)
+    except Exception as e:
+        logger.error(f"Failed to sync emails before drafting broadcast: {e}")
+        
+    emails = db.query(EmailLog).filter(EmailLog.company_id == company.id).order_by(EmailLog.timestamp.desc()).limit(10).all()
+    emails.reverse()
+    email_history = [{"direction": e.direction, "subject": e.subject, "body": e.body} for e in emails]
+    
+    draft = generate_telegram_broadcast_draft(
+        company_name=company.company_name,
+        company_description=company.description,
+        email_history=email_history,
+        invite_link=group.invite_link or "Link unavailable"
+    )
+    return {"success": True, "message": "Draft generated", "data": {"draft": draft}}
+
+
 @router.post("/broadcast-invite", response_model=StandardResponse[dict])
 def broadcast_invite(req: BroadcastRequest, db: Session = Depends(get_db)):
     """Broadcasts the group invite link to the main student Telegram channel."""

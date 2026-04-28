@@ -11,11 +11,12 @@ logger = logging.getLogger(__name__)
 WORKFLOW_MAP = {
     "INIT": "SEND_EMAIL",
     "CONTACTED": "WAIT_FOR_REPLY",
-    "DRIVE_CONFIRMED": "ASSIGN_SPOC",     # ← Drive confirmed by HR → assign SPOC
-    "SPOC_ASSIGNED": "SPOC_HANDLING",
+    "INFO_SHARED": "WAIT_FOR_CONFIRMATION",    # HR shared JD but not confirmed dates yet
+    "DRIVE_CONFIRMED": "ASSIGN_SPOC",          # HR confirmed → assign SPOC
+    "SPOC_ASSIGNED": "CREATE_TELEGRAM",         # SPOC assigned → create Telegram group
     "SPOC_HANDLING": "MONITOR_DRIVE",
     "SCHEDULE_RECEIVED": "SETUP_LOGISTICS",
-    "LOGISTICS_CONFIRMED": "ASSIGN_SPOC",  # legacy fallback
+    "LOGISTICS_CONFIRMED": "ASSIGN_SPOC",       # legacy fallback
     "APPROVED": "SPOC_HANDLING",
     "ACTIVE": "RUN_PROCESS",
     "COMPLETED": "DONE",
