@@ -210,6 +210,53 @@ Each status transition is handled autonomously by the AI orchestrator. At any st
 
 ---
 
+## 📚 Project Documentation
+
+This section lists all documents required for a B.Tech Major Project submission. All documents are stored in the `docs/` folder of this repository.
+
+### Required Submission Documents
+
+| # | Document | Description | Status |
+|---|----------|-------------|--------|
+| 1 | **Project Report** | Full thesis-format report covering all chapters (Introduction, Literature Survey, System Design, Implementation, Results, Conclusion) | ✅ Completed |
+| 2 | **Synopsis / Abstract** | 1–2 page summary of the project objectives, methodology, and outcomes | ✅ Completed |
+| 3 | **Presentation (PPT)** | Slides used during the final viva/presentation covering architecture, demo, and results | ✅ Completed |
+| 4 | **IEEE / Research Paper** *(if applicable)* | Paper submitted to a conference or journal based on this project | 🔄 In Progress |
+
+### Supporting Technical Documents
+
+| # | Document | Description |
+|---|----------|-------------|
+| 5 | **System Requirements Specification (SRS)** | Functional and non-functional requirements of the system |
+| 6 | **System Design Document (SDD)** | Architecture diagrams, ER diagram, data flow diagrams, and module descriptions |
+| 7 | **API Documentation** | Auto-generated from FastAPI Swagger UI at `/docs` |
+| 8 | **Test Report** | End-to-end workflow test results, bug log, and fix summary |
+| 9 | **User Manual** | Step-by-step guide for CDC coordinators to operate the dashboard |
+
+### Repository Structure for Docs
+
+```
+docs/
+├── report/
+│   └── PlacementCommnAI_Project_Report.pdf
+├── synopsis/
+│   └── synopsis.pdf
+├── presentation/
+│   └── final_presentation.pptx
+├── srs/
+│   └── SRS_Document.pdf
+├── design/
+│   ├── architecture_diagram.png
+│   ├── er_diagram.png
+│   └── data_flow_diagram.png
+└── paper/
+    └── research_paper_draft.pdf
+```
+
+> **Note for evaluators:** The full project report follows the NITK Surathkal B.Tech thesis format and covers all aspects of the system including literature review, system architecture, implementation details, and experimental results.
+
+---
+
 ## 🤝 Contributing
 
 This project was developed as a B.Tech final year major project at **NITK Surathkal**. Contributions and suggestions are welcome via GitHub Issues.
