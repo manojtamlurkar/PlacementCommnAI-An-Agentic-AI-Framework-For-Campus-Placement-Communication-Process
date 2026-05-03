@@ -206,7 +206,11 @@ Each status transition is handled autonomously by the AI orchestrator. At any st
 
 ## 📸 Screenshots
 
-> Add screenshots of your dashboard here after deployment.
+<img width="1779" height="884" alt="ChatGPT Image May 4, 2026, 12_39_59 AM" src="https://github.com/user-attachments/assets/af33b297-260b-4ede-b61c-0d96d1c01db4" />
+
+<img width="1804" height="872" alt="ChatGPT Image May 4, 2026, 12_34_36 AM" src="https://github.com/user-attachments/assets/3896a487-892c-468e-a4c7-27620b0360e0" />
+
+
 
 ---
 
